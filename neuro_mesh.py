@@ -40,6 +40,7 @@ def update_global_indices_efficient(local_items, global_items, item_map, item_se
             global_index = item_map[item]
         yield idx + 1, global_index 
 
+
 def remap_face(face, vertex_indices, texture_indices, normal_indices):
     """Remap the face indices from local to global."""
     new_face = []
@@ -66,29 +67,38 @@ def remap_face(face, vertex_indices, texture_indices, normal_indices):
         new_face.append(new_v)
     return 'f ' + ' '.join(new_face)
 
+
 def write_obj_file_batch(output_file, vertices, textures, normals, faces, batch_size=1000, precision=1):
     """Write the combined data into a single OBJ file using batch writing to improve efficiency."""
-    format_str = f"{{:.{precision}f}}"  
+    format_str = f"{{:.{precision}f}}"  # Format string for precision
 
     with open(output_file, 'w') as f:
-        
+        # Writing vertices in batches
         for i in range(0, len(vertices), batch_size):
             f.writelines(['v {} {} {}\n'.format(format_str.format(v[0]), format_str.format(v[1]), format_str.format(v[2]))
                           for v in vertices[i:i + batch_size]])
 
-        
-        for i in range(0, len(textures), batch_size):
-            f.writelines(['vt {} {}\n'.format(format_str.format(vt[0]), format_str.format(vt[1]))
-                          for vt in textures[i:i + batch_size]])
+        # Writing texture coordinates in batches
+        if textures:
+            for i in range(0, len(textures), batch_size):
+                f.writelines(['vt {} {}\n'.format(format_str.format(vt[0]), format_str.format(vt[1]))
+                              for vt in textures[i:i + batch_size]])
 
-        
-        for i in range(0, len(normals), batch_size):
-            f.writelines(['vn {} {} {}\n'.format(format_str.format(vn[0]), format_str.format(vn[1]), format_str.format(vn[2]))
-                          for vn in normals[i:i + batch_size]])
+        # Writing normals in batches
+        if normals:
+            for i in range(0, len(normals), batch_size):
+                f.writelines(['vn {} {} {}\n'.format(format_str.format(vn[0]), format_str.format(vn[1]), format_str.format(vn[2]))
+                              for vn in normals[i:i + batch_size]])
 
-        
-        for i in range(0, len(faces), batch_size):
-            f.writelines([face + '\n' for face in faces[i:i + batch_size]])
+        # Writing faces in batches
+        if len(faces) > 0:  # Ensure the faces list is not empty
+            if isinstance(faces[0], (tuple, list, np.ndarray)):  # Processed mesh (integer indices)
+                for i in range(0, len(faces), batch_size):
+                    f.writelines(['f {} {} {}\n'.format(face[0], face[1], face[2]) for face in faces[i:i + batch_size]])
+            else:  # Merged mesh (string format, already remapped)
+                for i in range(0, len(faces), batch_size):
+                    f.writelines([face + '\n' for face in faces[i:i + batch_size]])
+
 
 
 def merge_obj_files(folder_path, output_file, precision=1):
@@ -124,6 +134,7 @@ def expand_mesh(mesh, expansion_factor=0.01):
     mesh.vertices = o3d.utility.Vector3dVector(expanded_vertices)
     return mesh
 
+
 def taubin_smoothing(mesh, lambda_val=0.5, mu_val=-0.53, iterations=4):
     """Apply Taubin smoothing to the mesh."""
     for _ in range(iterations):
@@ -134,14 +145,17 @@ def taubin_smoothing(mesh, lambda_val=0.5, mu_val=-0.53, iterations=4):
         mesh.vertices = o3d.utility.Vector3dVector((1 + mu_val) * np.asarray(mesh.vertices) - mu_val * smooth_vertices)
     return mesh
 
+
 def preprocess_point_cloud(pcd, voxel_size=0.01):
     """Down-sample point cloud using a voxel grid"""
     return pcd.voxel_down_sample(voxel_size)
+
 
 def compute_alpha_shape(pcd, alpha_value):
     """Generate an alpha shape from the point cloud."""
     alpha_shape = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, alpha_value)
     return alpha_shape if not alpha_shape.is_empty() else None
+
 
 def process_mesh(mesh, mesh_name, output_dir, params):
     """Process a mesh: expand, preprocess, compute alpha shape, smooth, simplify, and save."""
@@ -149,7 +163,7 @@ def process_mesh(mesh, mesh_name, output_dir, params):
     if params['expand_mesh']:
         mesh = expand_mesh(mesh, params['expansion_factor'])
 
-    
+    # Extract point cloud from the mesh
     pcd = o3d.geometry.PointCloud()
     pcd.points = mesh.vertices
 
@@ -164,9 +178,6 @@ def process_mesh(mesh, mesh_name, output_dir, params):
         if mesh is None:
             print(f"No alpha shape generated for {mesh_name}. Skipping.")
             return
-    else:
-        # 
-        pass  # expand later
 
     # Apply smoothing
     if params['apply_smoothing']:
@@ -177,14 +188,42 @@ def process_mesh(mesh, mesh_name, output_dir, params):
         target_triangle_count = int(len(mesh.triangles) * params['reduction_factor'])
         mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=target_triangle_count)
 
-    # Name the output file including parameters
-    params_str = f"exp{params['expansion_factor']}_vox{params['voxel_size']}_alpha{params['alpha_value']}_red{params['reduction_factor']}"
+    # Dynamically construct the parameters string based on used parameters
+    params_str_list = []
+
+    if params['expand_mesh']:
+        params_str_list.append(f"exp{params['expansion_factor']}")
+
+    if params['preprocess_pcd']:
+        params_str_list.append(f"vox{params['voxel_size']}")
+
+    if params['compute_alpha_shape']:
+        params_str_list.append(f"alpha{params['alpha_value']}")
+
+    if params['apply_smoothing']:
+        params_str_list.append(f"smooth{params['iterations']}")
+
+    if params['simplify_mesh']:
+        params_str_list.append(f"red{params['reduction_factor']}")
+
+   
+    params_str_list.append(f"prec{params['precision']}")
+
+   
+    params_str = '_'.join(params_str_list)
+
+    # Name the output file including active parameters
     output_file = output_dir / f"{mesh_name}_processed_{params_str}.obj"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # Save the mesh
-    o3d.io.write_triangle_mesh(str(output_file), mesh)
+    
+    vertices = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.triangles) + 1  # OBJ indices start at 1
+
+   
+    write_obj_file_batch(output_file, vertices, [], [], faces, batch_size=1000, precision=params['precision'])
     print(f"Processed mesh saved to {output_file}")
+
 
 def process_subfolder(subfolder_path, output_base_dir, params):
     """Process all OBJ files in a subfolder, optionally merge them, and process the meshes."""
@@ -208,14 +247,14 @@ def process_subfolder(subfolder_path, output_base_dir, params):
         merge_obj_files(str(subfolder_path), str(merged_obj_file), precision=precision)
         print(f"Merged OBJ files saved to {merged_obj_file}")
 
-        # Load the merged OBJ file
+        
         mesh = o3d.io.read_triangle_mesh(str(merged_obj_file))
 
-        # Check if the mesh has vertices and faces
+        
         if not mesh.has_vertices() or not mesh.has_triangles():
             print(f"Merged mesh in {subfolder_name} is empty or invalid. Skipping.")
             return
-        # Process the merged mesh
+    
         process_mesh(mesh, subfolder_name, output_dir, params)
 
         # Optionally delete the merged OBJ file
@@ -233,46 +272,50 @@ def process_subfolder(subfolder_path, output_base_dir, params):
 
             process_mesh(mesh, mesh_name, output_dir, params)
 
+
 #USER INPUT#
 '''Set your processes and parameters below'''
 
 def main():
     # Parameters
     params = {
-    # General Parameters
-    'merge_objs': True,
-    'delete_merged': True,
+        # General Parameters
+        'merge_objs': True,
+        'delete_merged': False,
 
-    # Mesh Processing Parameters
-    'expand_mesh': False,
-    'expansion_factor': 0.06,
+        # Mesh Processing Parameters
+        'expand_mesh': False,
+        'expansion_factor': 0.06,
 
-    'preprocess_pcd': False,
-    'voxel_size': 0.01,
+        'preprocess_pcd': False,
+        'voxel_size': 0.01,
 
-    'compute_alpha_shape': False,
-    'alpha_value': 8,
+        'compute_alpha_shape': False,
+        'alpha_value': 20,
 
-    'apply_smoothing': False,
-    'iterations': 8,
+        'apply_smoothing': True,
+        'iterations': 8,
 
-    'simplify_mesh': True,
-    'reduction_factor': 0.5,
+        'simplify_mesh': True,
+        'reduction_factor': 0.5,
 
-    # Precision Parameter
-    'precision': 2  # Set the decimal precision
-}
+        # Numerical Precision Parameter
+        'precision': 2  # Set the decimal precision
+    }
 
 
     # Define the base directory containing subfolders
-    base_dir = Path(r"path")  # Replace with your base directory
-    output_base_dir = Path(r"path")  # Replace with your output directory
+    base_dir = Path(r"C:\Users\example-data")  # Replace with your base directory
+    output_base_dir = Path(r"C:\Users\smooth test")  # Replace with your output directory
     output_base_dir.mkdir(parents=True, exist_ok=True)
 
-    
-    for subfolder in base_dir.iterdir():
-        if subfolder.is_dir():
-            process_subfolder(subfolder, output_base_dir, params)
+
+    # Gather all folders to process: subfolders and the base folder itself
+    folders_to_process = [base_dir] + [subfolder for subfolder in base_dir.iterdir() if subfolder.is_dir()]
+
+    for folder in folders_to_process:
+        process_subfolder(folder, output_base_dir, params)
+
 
 if __name__ == '__main__':
     main()
