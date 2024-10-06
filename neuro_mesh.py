@@ -10,6 +10,12 @@ import glob
 import open3d as o3d
 import numpy as np
 from pathlib import Path
+import trimesh
+from scipy.ndimage import binary_fill_holes
+from scipy import ndimage
+import tifffile as tiff
+from tqdm import tqdm
+from PIL import Image
 
 def parse_obj_file(file_path, precision=1):
     """Parse an OBJ file and return vertices, textures, normals, and faces."""
@@ -102,7 +108,7 @@ def write_obj_file_batch(output_file, vertices, textures, normals, faces, batch_
 
 
 def merge_obj_files(folder_path, output_file, precision=1):
-    """Merge multiple OBJ files from a folder into one output file using efficient methods and batch writing."""
+    """Merge multiple OBJ files from a folder into one output file"""
     obj_files = glob.glob(os.path.join(folder_path, '*.obj'))
 
     global_vertices, global_textures, global_normals, global_faces = [], [], [], []
@@ -158,71 +164,115 @@ def compute_alpha_shape(pcd, alpha_value):
 
 
 def process_mesh(mesh, mesh_name, output_dir, params):
-    """Process a mesh: expand, preprocess, compute alpha shape, smooth, simplify, and save."""
+    """Process a mesh according to specified parameters."""
     
-    if params['expand_mesh']:
-        mesh = expand_mesh(mesh, params['expansion_factor'])
-
-    # Extract point cloud from the mesh
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = mesh.vertices
-
-    # Preprocess point cloud
-    if params['preprocess_pcd']:
-        pcd = preprocess_point_cloud(pcd, params['voxel_size'])
-
-    # Compute alpha shape
+    # First, compute alpha shape if required
     if params['compute_alpha_shape']:
+        # Preprocess point cloud as a parameter of alpha shape
         print(f"Computing alpha shape with alpha = {params['alpha_value']}")
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = mesh.vertices
+        pcd = preprocess_point_cloud(pcd, params['voxel_size'])
         mesh = compute_alpha_shape(pcd, params['alpha_value'])
         if mesh is None:
             print(f"No alpha shape generated for {mesh_name}. Skipping.")
             return
+    else:
+        # If not computing alpha shape, create point cloud from mesh (justincase)
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = mesh.vertices
 
-    # Apply smoothing
-    if params['apply_smoothing']:
-        mesh = taubin_smoothing(mesh, iterations=params['iterations'])
-
-    # Simplify the mesh
+    # Second, simplify the mesh if required
     if params['simplify_mesh']:
         target_triangle_count = int(len(mesh.triangles) * params['reduction_factor'])
         mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=target_triangle_count)
 
-    # Dynamically construct the parameters string based on used parameters
+    # Third, apply smoothing if required
+    if params['apply_smoothing']:
+        # Expand mesh 
+        if params['expand_mesh']:
+            mesh = expand_mesh(mesh, params['expansion_factor'])
+        mesh = taubin_smoothing(mesh, iterations=params['iterations'])
+
+    # flip the mesh
+    if params['flip_mesh']:
+        print(f"Flipping mesh {mesh_name} horizontally...")
+        mesh = flip_mesh_horizontally(mesh, params['brain_size_x'])
+        print(f"Mesh {mesh_name} flipped.")
+
+    # Build parameters string
     params_str_list = []
-
-    if params['expand_mesh']:
-        params_str_list.append(f"exp{params['expansion_factor']}")
-
-    if params['preprocess_pcd']:
-        params_str_list.append(f"vox{params['voxel_size']}")
 
     if params['compute_alpha_shape']:
         params_str_list.append(f"alpha{params['alpha_value']}")
-
-    if params['apply_smoothing']:
-        params_str_list.append(f"smooth{params['iterations']}")
+        params_str_list.append(f"vox{params['voxel_size']}")
 
     if params['simplify_mesh']:
         params_str_list.append(f"red{params['reduction_factor']}")
 
-   
-    params_str_list.append(f"prec{params['precision']}")
+    if params['apply_smoothing']:
+        params_str_list.append(f"smooth{params['iterations']}")
+        if params['expand_mesh']:
+            params_str_list.append(f"exp{params['expansion_factor']}")
 
-   
+    if params['flip_mesh']:
+        params_str_list.append("flipped")
+
+    if params['voxelize_mesh']:
+        params_str_list.append("voxmesh")
+
+    params_str_list.append(f"prec{params['precision']}")
     params_str = '_'.join(params_str_list)
 
     # Name the output file including active parameters
     output_file = output_dir / f"{mesh_name}_processed_{params_str}.obj"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    
+    # Save the processed mesh as OBJ
     vertices = np.asarray(mesh.vertices)
     faces = np.asarray(mesh.triangles) + 1  # OBJ indices start at 1
 
-   
     write_obj_file_batch(output_file, vertices, [], [], faces, batch_size=1000, precision=params['precision'])
     print(f"Processed mesh saved to {output_file}")
+
+    # Voxelization process
+    if params['voxelize_mesh']:
+        print("Starting voxelization process...")
+        # Convert Open3D mesh to Trimesh
+        trimesh_mesh = trimesh.Trimesh(vertices=vertices, faces=faces - 1)  # Faces start at 0 in Trimesh
+        min_coords = trimesh_mesh.vertices.min(axis=0)
+
+        # Calculate transformation factors
+        scale_factor = calculate_transformation_factors(params['template_voxel_size'])
+        transformed_min_coords = transform_coordinates(min_coords, scale_factor)
+
+        # Voxelize the mesh
+        voxel_grid = voxelize_mesh(trimesh_mesh, pitch=params['pitch'])
+        print(f"Voxelization complete. Voxel grid shape: {voxel_grid.shape}")
+
+        # Interpolate voxel grid
+        voxel_grid = interpolate_voxel_grid(
+            voxel_grid,
+            downscale_factor_xy=params['downscale_factor_xy'],
+            downscale_factor_z=params['downscale_factor_z'],
+            fill_volume=params.get('fill_volume', False)
+        )
+        print(f"Interpolation complete. Voxel grid shape: {voxel_grid.shape}")
+
+        # Integrate into template grid
+        final_grid = integrate_into_template_grayscale(
+            voxel_grid,
+            params['template_dims'],
+            params['template_voxel_size'],
+            min_coords
+        )
+        print(f"Integration complete. Final grid shape: {final_grid.shape}")
+
+        # Save as TIFF
+        if params.get('save_as_tiff', True):
+            output_tiff_file = output_dir / f"{mesh_name}_processed_{params_str}.tif"
+            save_as_tiff(final_grid, output_tiff_file)
+            print(f"Voxelized mesh saved as TIFF at {output_tiff_file}")
 
 
 def process_subfolder(subfolder_path, output_base_dir, params):
@@ -247,14 +297,13 @@ def process_subfolder(subfolder_path, output_base_dir, params):
         merge_obj_files(str(subfolder_path), str(merged_obj_file), precision=precision)
         print(f"Merged OBJ files saved to {merged_obj_file}")
 
-        
+        # Read merged mesh
         mesh = o3d.io.read_triangle_mesh(str(merged_obj_file))
 
-        
         if not mesh.has_vertices() or not mesh.has_triangles():
             print(f"Merged mesh in {subfolder_name} is empty or invalid. Skipping.")
             return
-    
+
         process_mesh(mesh, subfolder_name, output_dir, params)
 
         # Optionally delete the merged OBJ file
@@ -264,6 +313,7 @@ def process_subfolder(subfolder_path, output_base_dir, params):
         # Process each OBJ file individually
         for obj_file in obj_files:
             mesh_name = obj_file.stem
+
             mesh = o3d.io.read_triangle_mesh(str(obj_file))
 
             if not mesh.has_vertices() or not mesh.has_triangles():
@@ -272,6 +322,139 @@ def process_subfolder(subfolder_path, output_base_dir, params):
 
             process_mesh(mesh, mesh_name, output_dir, params)
 
+
+
+def flip_obj_horizontally(input_path, output_path, brain_size_x):
+    flipped_lines = []
+
+    with open(input_path, 'r') as obj_file:
+        for line in obj_file:
+            # Process vertex lines, which start with 'v '
+            if line.startswith('v '):
+                parts = line.split()
+                # Parse the x, y, z coordinates
+                x, y, z = map(float, parts[1:4])
+                # Perform the horizontal flip (x-axis flip around the center)
+                x_flipped = brain_size_x - x
+                # Reconstruct the line with the flipped x-coordinate
+                flipped_line = f"v {x_flipped} {y} {z}\n"
+                flipped_lines.append(flipped_line)
+            else:
+                flipped_lines.append(line)
+
+    # Write the flipped content to a new OBJ file
+    with open(output_path, 'w') as output_file:
+        output_file.writelines(flipped_lines)
+
+def flip_mesh_horizontally(mesh, brain_size_x):
+    """Flip an Open3D mesh horizontally around the center."""
+    vertices = np.asarray(mesh.vertices)
+    vertices[:, 0] = brain_size_x - vertices[:, 0]
+    mesh.vertices = o3d.utility.Vector3dVector(vertices)
+    return mesh
+
+
+def calculate_transformation_factors(template_voxel_size):
+    scale_factor = 1 / template_voxel_size
+    return scale_factor
+
+def transform_coordinates(min_coords, scale_factor):
+    return min_coords * scale_factor
+
+def voxelize_mesh(mesh, pitch):
+    voxel_grid = mesh.voxelized(pitch=pitch).matrix.astype(bool)
+    return voxel_grid
+
+def resize_xy_slices(voxel_volume, scale_factor):
+    z, y, x = voxel_volume.shape
+    new_y = int(np.ceil(y * scale_factor))
+    new_x = int(np.ceil(x * scale_factor))
+    resized_slices = []
+
+    for i in tqdm(range(z), desc="2D Lanczos Resampling (XY)"):
+        slice_ = voxel_volume[i, :, :]
+        img = Image.fromarray(slice_)
+        img_resized = img.resize((new_x, new_y), resample=Image.LANCZOS)
+        resized_slice = np.array(img_resized)
+        resized_slices.append(resized_slice)
+
+    resized_volume = np.stack(resized_slices, axis=0)
+    return resized_volume
+
+def interpolate_voxel_grid(voxel_grid, downscale_factor_xy=None, downscale_factor_z=None, fill_volume=False):
+    voxel_volume = voxel_grid.astype(np.uint8)
+    voxel_volume[voxel_volume > 0] = 200
+
+    if fill_volume:
+        print("Filling interior voxels...")
+        filled = binary_fill_holes(voxel_volume).astype(np.uint8) * 200
+        voxel_volume = filled
+        print("Interior voxels filled.")
+
+    if downscale_factor_xy and downscale_factor_xy != 1.0:
+        print(f"Rescaling XY dimensions by a factor of {downscale_factor_xy}...")
+        voxel_volume = resize_xy_slices(voxel_volume, 1 / downscale_factor_xy)
+        print("XY rescaling completed.")
+
+    if downscale_factor_z and downscale_factor_z > 1.0:
+        print(f"Downscaling Z dimension by a factor of {downscale_factor_z} using linear interpolation...")
+        z, y, x = voxel_volume.shape
+        new_z = int(np.ceil(z / downscale_factor_z))
+
+        original_z_indices = np.arange(z)
+        new_z_indices = np.linspace(0, z - 1, new_z)
+
+        rescaled_volume = np.zeros((new_z, voxel_volume.shape[1], voxel_volume.shape[2]), dtype=voxel_volume.dtype)
+
+        for y_idx in tqdm(range(voxel_volume.shape[1]), desc="1D Linear Resampling (Z)", leave=True):
+            for x_idx in range(voxel_volume.shape[2]):
+                column = voxel_volume[:, y_idx, x_idx].astype(float)
+                resampled_column = np.interp(new_z_indices, original_z_indices, column)
+                rescaled_volume[:, y_idx, x_idx] = resampled_column.astype(np.uint8)
+
+        voxel_volume = rescaled_volume
+        print("Z downscaling with linear interpolation completed.")
+    elif downscale_factor_z and downscale_factor_z <= 1.0:
+        raise ValueError("Z downscale factor should be greater than 1.")
+
+    return voxel_volume
+
+def integrate_into_template_grayscale(voxel_grid, template_dims, template_voxel_size, min_coords):
+    scale_factor = 1 / template_voxel_size
+    target_coords = transform_coordinates(min_coords, scale_factor)
+    target_coords = target_coords.astype(int)
+
+    final_grid = np.zeros(template_dims, dtype=np.uint8)
+
+    min_extent = np.minimum(final_grid.shape, voxel_grid.shape + target_coords)
+
+    start_final = np.maximum(target_coords, 0)
+    end_final = start_final + voxel_grid.shape
+
+    start_voxel = np.maximum(-target_coords, 0)
+    end_voxel = start_voxel + (min_extent - start_final)
+
+    final_slices = tuple(
+        slice(start_final[dim], min(end_final[dim], final_grid.shape[dim]))
+        for dim in range(3)
+    )
+
+    voxel_slices = tuple(
+        slice(start_voxel[dim], end_voxel[dim])
+        for dim in range(3)
+    )
+
+    if voxel_grid.dtype == bool:
+        final_grid[final_slices] = np.maximum(final_grid[final_slices], voxel_grid[voxel_slices].astype(np.uint8) * 255)
+    else:
+        final_grid[final_slices] = np.maximum(final_grid[final_slices], voxel_grid[voxel_slices])
+
+    return final_grid
+
+def save_as_tiff(voxel_grid, file_path):
+    voxel_grid = np.transpose(voxel_grid, (2, 1, 0))  # Convert to (X, Y, Z) for TIFF
+    tiff.imwrite(str(file_path), voxel_grid.astype(np.uint8), photometric='minisblack',)
+    print(f"Saved voxel grid as TIFF at: {file_path}")
 
 #USER INPUT#
 '''Set your processes and parameters below'''
@@ -283,39 +466,55 @@ def main():
         'merge_objs': True,
         'delete_merged': False,
 
+        # Flip Mesh Parameter
+        'flip_mesh': True,  # Set to True to flip meshes horizontally
+        'brain_size_x': 627.76, 
+
         # Mesh Processing Parameters
-        'expand_mesh': False,
-        'expansion_factor': 0.06,
 
-        'preprocess_pcd': False,
-        'voxel_size': 0.01,
 
+        # Alpha parameters
         'compute_alpha_shape': False,
         'alpha_value': 20,
-
+        'preprocess_pcd': False,  
+        'voxel_size': 0.01,
+        
+        
+        #Smoothing
         'apply_smoothing': True,
         'iterations': 8,
-
+        'expand_mesh': False,  
+        'expansion_factor': 0.06,
+        
+        
+        #Simplify
         'simplify_mesh': True,
         'reduction_factor': 0.5,
 
         # Numerical Precision Parameter
-        'precision': 2  # Set the decimal precision
+        'precision': 2,  # Set the decimal precision
+
+        # Voxelization Parameters
+        'voxelize_mesh': True,
+        'template_voxel_size': 0.38,
+        'template_dims': (1652, 773, 456),  # (Z, Y, X)
+        'downscale_factor_xy': 3,
+        'downscale_factor_z': 3,
+        'pitch': 0.12666,
+        'fill_volume': True,
+        'save_as_tiff': True,
     }
 
-
     # Define the base directory containing subfolders
-    base_dir = Path(r"C:\Users\example-data")  # Replace with your base directory
-    output_base_dir = Path(r"C:\Users\smooth test")  # Replace with your output directory
+    base_dir = Path(r"C:\Users\serveradmin\Dropbox\labor\ITO\Image_processing_analysis\neuro-meshtools\OBJ-combine-convert-simplify\lc16-tester\obj\testobj")  # Replace with your base directory
+    output_base_dir = Path(r"C:\Users\serveradmin\Dropbox\labor\ITO\Image_processing_analysis\neuro-meshtools\OBJ-combine-convert-simplify\lc16-tester\processed")  # Replace with your output directory
     output_base_dir.mkdir(parents=True, exist_ok=True)
-
 
     # Gather all folders to process: subfolders and the base folder itself
     folders_to_process = [base_dir] + [subfolder for subfolder in base_dir.iterdir() if subfolder.is_dir()]
 
     for folder in folders_to_process:
         process_subfolder(folder, output_base_dir, params)
-
 
 if __name__ == '__main__':
     main()
