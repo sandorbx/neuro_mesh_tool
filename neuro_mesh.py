@@ -168,7 +168,7 @@ def process_mesh(mesh, mesh_name, output_dir, params):
     
     # First, compute alpha shape if required
     if params['compute_alpha_shape']:
-        # Preprocess point cloud as a parameter of alpha shape
+       
         print(f"Computing alpha shape with alpha = {params['alpha_value']}")
         pcd = o3d.geometry.PointCloud()
         pcd.points = mesh.vertices
@@ -178,29 +178,29 @@ def process_mesh(mesh, mesh_name, output_dir, params):
             print(f"No alpha shape generated for {mesh_name}. Skipping.")
             return
     else:
-        # If not computing alpha shape, create point cloud from mesh (justincase)
+        #create point cloud from mesh (justincase)
         pcd = o3d.geometry.PointCloud()
         pcd.points = mesh.vertices
 
-    # Second, simplify the mesh if required
+    
     if params['simplify_mesh']:
         target_triangle_count = int(len(mesh.triangles) * params['reduction_factor'])
         mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=target_triangle_count)
 
-    # Third, apply smoothing if required
+    
     if params['apply_smoothing']:
-        # Expand mesh 
+        
         if params['expand_mesh']:
             mesh = expand_mesh(mesh, params['expansion_factor'])
         mesh = taubin_smoothing(mesh, iterations=params['iterations'])
 
-    # flip the mesh
+    
     if params['flip_mesh']:
         print(f"Flipping mesh {mesh_name} horizontally...")
         mesh = flip_mesh_horizontally(mesh, params['brain_size_x'])
         print(f"Mesh {mesh_name} flipped.")
 
-    # Build parameters string
+    
     params_str_list = []
 
     if params['compute_alpha_shape']:
@@ -224,18 +224,18 @@ def process_mesh(mesh, mesh_name, output_dir, params):
     params_str_list.append(f"prec{params['precision']}")
     params_str = '_'.join(params_str_list)
 
-    # Name the output file including active parameters
+   
     output_file = output_dir / f"{mesh_name}_processed_{params_str}.obj"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # Save the processed mesh as OBJ
+    
     vertices = np.asarray(mesh.vertices)
     faces = np.asarray(mesh.triangles) + 1  # OBJ indices start at 1
 
     write_obj_file_batch(output_file, vertices, [], [], faces, batch_size=1000, precision=params['precision'])
     print(f"Processed mesh saved to {output_file}")
 
-    # Voxelization process
+    # Voxelization
     if params['voxelize_mesh']:
         print("Starting voxelization process...")
         # Convert Open3D mesh to Trimesh
@@ -297,7 +297,7 @@ def process_subfolder(subfolder_path, output_base_dir, params):
         merge_obj_files(str(subfolder_path), str(merged_obj_file), precision=precision)
         print(f"Merged OBJ files saved to {merged_obj_file}")
 
-        # Read merged mesh
+        
         mesh = o3d.io.read_triangle_mesh(str(merged_obj_file))
 
         if not mesh.has_vertices() or not mesh.has_triangles():
@@ -306,11 +306,11 @@ def process_subfolder(subfolder_path, output_base_dir, params):
 
         process_mesh(mesh, subfolder_name, output_dir, params)
 
-        # Optionally delete the merged OBJ file
+        
         if params['delete_merged']:
             os.remove(merged_obj_file)
     else:
-        # Process each OBJ file individually
+        
         for obj_file in obj_files:
             mesh_name = obj_file.stem
 
@@ -342,7 +342,7 @@ def flip_obj_horizontally(input_path, output_path, brain_size_x):
             else:
                 flipped_lines.append(line)
 
-    # Write the flipped content to a new OBJ file
+   
     with open(output_path, 'w') as output_file:
         output_file.writelines(flipped_lines)
 
@@ -464,10 +464,10 @@ def main():
     params = {
         # General Parameters
         'merge_objs': True,
-        'delete_merged': False,
+        
 
         # Flip Mesh Parameter
-        'flip_mesh': True,  # Set to True to flip meshes horizontally
+        'flip_mesh': False,  # Set to True to flip meshes horizontally
         'brain_size_x': 627.76, 
 
         # Mesh Processing Parameters
@@ -481,7 +481,7 @@ def main():
         
         
         #Smoothing
-        'apply_smoothing': True,
+        'apply_smoothing': False,
         'iterations': 8,
         'expand_mesh': False,  
         'expansion_factor': 0.06,
@@ -495,7 +495,7 @@ def main():
         'precision': 2,  # Set the decimal precision
 
         # Voxelization Parameters
-        'voxelize_mesh': True,
+        'voxelize_mesh': False,
         'template_voxel_size': 0.38,
         'template_dims': (1652, 773, 456),  # (Z, Y, X)
         'downscale_factor_xy': 3,
@@ -503,6 +503,8 @@ def main():
         'pitch': 0.12666,
         'fill_volume': True,
         'save_as_tiff': True,
+        
+        'delete_merged': True, #Delete the raw unprocessed file to save memory
     }
 
     # Define the base directory containing subfolders
